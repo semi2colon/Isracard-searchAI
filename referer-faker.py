@@ -1,51 +1,50 @@
 from flask import Flask, Response, request
 import requests
 import os
-import re
-from bs4 import BeautifulSoup
 
 app = Flask(__name__)
 
-# Config
-TARGET_URL = "https://fc9ae48bc0a4-search-app.gaitspace.net"
+# The real Gaitspace backend
+GAITSPACE_BASE = "https://fc9ae48bc0a4-search-app.gaitspace.net"
 FAKE_REFERER = "https://stmarketing.isracard.co.il"
 
-def rewrite_html(html: str, base_url: str) -> str:
-    """Convert all relative paths to absolute paths based on base_url."""
-    soup = BeautifulSoup(html, "html.parser")
-    
-    for tag in soup.find_all(["script", "link", "img", "iframe", "source"]):
-        attr = "src" if tag.name != "link" else "href"
-        if tag.has_attr(attr):
-            src = tag[attr]
-            if src.startswith("/"):
-                tag[attr] = base_url + src
-            elif src.startswith("//"):
-                tag[attr] = "https:" + src
-    return str(soup)
+@app.route('/', defaults={'path': ''})
+@app.route('/<path:path>')
+def proxy(path):
+    # Build full target URL
+    target_url = f"{GAITSPACE_BASE}/{path}"
+    if request.query_string:
+        target_url += f"?{request.query_string.decode('utf-8')}"
 
-@app.route('/')
-def proxy():
+    # Forward browser headers and override Referer
     headers = {
         'Referer': FAKE_REFERER,
-        'User-Agent': request.headers.get('User-Agent')
+        'User-Agent': request.headers.get('User-Agent', 'Mozilla/5.0'),
+        'Accept': request.headers.get('Accept', '*/*'),
+        'Content-Type': request.headers.get('Content-Type', ''),
     }
 
-    try:
-        resp = requests.get(TARGET_URL, headers=headers)
-        content_type = resp.headers.get('Content-Type', '')
+    # Proxy method
+    method = request.method.lower()
+    req_func = getattr(requests, method)
 
-        # Rewrite HTML only if the response is text/html
-        if 'text/html' in content_type:
-            rewritten = rewrite_html(resp.text, TARGET_URL)
-            return Response(rewritten, status=resp.status_code, content_type=content_type)
-        else:
-            # Stream other content types as-is
-            return Response(resp.content, status=resp.status_code, content_type=content_type)
+    try:
+        resp = req_func(
+            target_url,
+            headers=headers,
+            data=request.get_data(),
+            stream=True,
+            timeout=10
+        )
+
+        excluded_headers = ['content-encoding', 'transfer-encoding', 'connection']
+        response_headers = {k: v for k, v in resp.headers.items() if k.lower() not in excluded_headers}
+
+        return Response(resp.content, status=resp.status_code, headers=response_headers)
     except Exception as e:
         return f"Proxy error: {e}", 500
 
-# Run with correct port on Render
+# Required for Render
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host='0.0.0.0', port=port)
